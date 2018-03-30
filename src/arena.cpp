@@ -1,14 +1,21 @@
 #include <arena.h>
-#include <arena_types.h>
+#include <iostream>
 #include <time.h>
+#include <vector>
+#include <string>
+#include <future>
+#include <sc2api/sc2_args.h>
+#include <sc2api/sc2_game_settings.h>
+#include <sc2api/sc2_connection.h>
+#include <sc2utils/sc2_manage_process.h>
+#include <arena_process.h>
 
 using namespace std;
 
-Arena::Arena(vector<Bot> bots, vector<string> maps)
-{
-	this->bots = bots;
+void Arena::init(vector<Bot> bots, vector<string> maps) {
+	Arena::bots = bots;
 	num_players = bots.size();
-	this->maps = maps;
+	Arena::maps = maps;
 	num_maps = maps.size();
 }
 
@@ -44,44 +51,23 @@ void Arena::resolve_map(SC2APIProtocol::RequestCreateGame* request, string map_n
 	local_map->set_map_path(map_name);
 }
 
-bool make_proc(string cmd, vector<string> args) {
-
-	string full_cmd = "";
-	for (const auto &s : args) cmd += s;
-	cout << "Starting " << full_cmd << endl;
-
-	FILE* in = _popen(cmd.c_str(), "r");
-
-	if (in == NULL) {
-		const string msg = "Couldn't make process for " + cmd + ".";
-		cerr << msg << endl;
-		return false;
-	}
-
-	char line[256];
-	while (fgets(line, sizeof(line), in) != NULL) {
-		// TODO: log stdout to file
-	}
-
-	return true;
-}
-
 ClientStatus client_tick(sc2::Connection* client, sc2::Server* server) {
 	auto client_status = ClientStatus::Running;
 	clock_t last_request = clock();
 
 	while (client_status == ClientStatus::Running) {
 		if (server->HasRequest()) {
-			const auto request = server->PeekRequest();
-			if (request.second->has_quit()) {
+			if (server->PeekRequest().second->has_quit()) {
 				client_status = ClientStatus::Quit;
 				// Intercept leave game and quit requests, we want to keep game alive to save replays
 				break;
 			}
-
-			if (client->connection_ != nullptr) {
-				server->SendRequest(client->connection_);
+			else if (server->connections_.size() <= 0 || client->connection_ == nullptr) {
+				client_status = ClientStatus::ClientTimeout;
+				break;
 			}
+
+			server->SendRequest(client->connection_);
 
 			// Block for sc2's response then queue it.
 			SC2APIProtocol::Response* response = nullptr;
@@ -97,24 +83,23 @@ ClientStatus client_tick(sc2::Connection* client, sc2::Server* server) {
 						client_status = ClientStatus::GameTimeout;
 					}
 				}
-			}
 
-			// Send the response back to the client.
-			if (server->connections_.size() > 0) {
+				// Send the response back to the client.
 				server->QueueResponse(client->connection_, response);
 				server->SendResponse();
 			}
 			else {
-				client_status = ClientStatus::ClientTimeout;
+				cout << "Null response dammit\n";
 			}
+
+
+
 			last_request = clock();
 		}
-		else {
-			if ((last_request + (50 * CLOCKS_PER_SEC)) < clock()) {
-				cout << "Client timeout in loop" << endl;
-				client_status = ClientStatus::ClientTimeout;
-			}
-		}
+		//else if ((last_request + (50 * CLOCKS_PER_SEC)) < clock()) {
+		//	cout << "Client timeout in loop" << endl;
+		//	client_status = ClientStatus::ClientTimeout;
+		//}
 		this_thread::sleep_for(std::chrono::nanoseconds(12ns));
 	}
 
@@ -122,66 +107,58 @@ ClientStatus client_tick(sc2::Connection* client, sc2::Server* server) {
 }
 
 void Arena::start_sc2(int port, int argc, char* argv[]) {
-	// 1. Launch two instances of the SC2 client.
+	// 1) Launch two game instances with separate ports.
 	// Setup sc2api websocket server
 	for (int i = 0; i < num_players; i++) {
 		sc2::Server* s = new sc2::Server();
 		servers.push_back(s);
-		cout << "Server port:" << port << endl;
+		cout << "Player " << i << ", port:" << port << endl;
 		s->Listen(to_string(port++).c_str(), REQUEST_TIMEOUT, REQUEST_TIMEOUT, GAME_THREADS);
 	}
 
-	// Run sc2 executable to connect server
+	cout << "Starting " << num_players << " instances of sc2 "
+		<< "(timeout " << GAME_TIMEOUT << ")..." << endl;
 	sc2::ParseSettings(argc, argv, process_settings, game_settings);
-
-	sc2_pids = vector<uint64_t>(num_players);
+	pids.reserve(num_players);
 	for (int i = 0; i < num_players; i++) {
-		cout << "SC2 port:" << port << endl;
-		sc2_pids[i] = sc2::StartProcess(process_settings.process_path, {
+		pids[i] = sc2::StartProcess(process_settings.process_path, {
 			"-listen", BOT_HOST,
 			"-port", to_string(port++).c_str(),
 			"-displayMode", "0",
 			"-dataVersion", process_settings.data_version });
+		cout << "Starting SC2, PID:" << pids[i]
+			<< ", port:" << port << endl;
 	}
-	cout << "Starting " << num_players << " instances of sc2 ";
-	cout << "(timeout " << GAME_TIMEOUT << ")...";
+
 	// Give game 10 sec to start
 	sc2::SleepFor(GAME_TIMEOUT);
-	cout << "Started" << endl;
 }
 
 void Arena::connect_players(int port, string first_map, string proc_path) {
 	// Connect to localhost websocket
 	for (int i = 0; i < num_players; i++) {
-		cout << "Connecting port:" << port << endl;
-		auto con = new sc2::Connection();
-		con->Connect(BOT_HOST, port++);
-		connections.push_back(con);
+		cout << "Player " << i << ", connecting port:" << port << endl;
+		connections.push_back(new sc2::Connection());
+		connections.back()->Connect(BOT_HOST, port++);
 	}
 
-	// 2. Choose one of the instances to act as the game host (clients[0])
-	// 3. Send RequestCreateGame to the host with a valid multi player map.
-	sc2::ProtoInterface proto;
+	// 2) Designate a host, and Request.create_game with a multiplayer map.
 	sc2::GameRequestPtr req = proto.MakeRequest();
 	SC2APIProtocol::RequestCreateGame* game_request = req->mutable_create_game();
 	resolve_map(game_request, first_map, proc_path);
 	game_request->set_realtime(false);
 
-	// 4. Send RequestJoinGame to both of the clients with the desired player config.
-	// Might as well inform it of the players... we already know them
 	for (auto const &p : bots) {
-		// TODO: What is so special about the PlayerSetup* they return to us?
 		SC2APIProtocol::PlayerSetup* playerSetup = game_request->add_player_setup();
 		playerSetup->set_type(SC2APIProtocol::PlayerType(p.type));
 		playerSetup->set_race(SC2APIProtocol::Race(int(p.race) + 1));
 		playerSetup->set_difficulty(SC2APIProtocol::Difficulty(p.difficulty));
 	}
 
-	// Finish 3.
 	connections[0]->Send(req.get());
-	SC2APIProtocol::Response* create_response = nullptr;
-	if (connections[0]->Receive(create_response, GAME_TIMEOUT)) {
-		auto game_response = create_response->create_game();
+	SC2APIProtocol::Response* response_create_game = nullptr;
+	if (connections[0]->Receive(response_create_game, GAME_TIMEOUT)) {
+		auto game_response = response_create_game->create_game();
 		if (game_response.has_error()) {
 			string errorCode = "Unknown";
 			switch (game_response.error()) {
@@ -201,54 +178,38 @@ void Arena::connect_players(int port, string first_map, string proc_path) {
 			exit(-1);
 		}
 		else {
-			cout << "Recieved create game response " << create_response->data().DebugString() << endl;
+			cout << "Recieved create game response " << response_create_game->data().DebugString() << endl;
 		}
 	}
-}
+	// 3) Call Request.join on BOTH clients.Join will block until both clients connect.
+	// The client take over from here and do coordinator.JoinGame(); themselves
 
-//int count_running() {
-//	int count = 0;
-//
-//	for (int i = 0; i < bot_procs.size(); i++) {
-//		if (bot_procs[i]->running()) {
-//			count++;
-//		}
-//	}
-//
-//	return count;
-//}
+
+	
+}
 
 int get_results(sc2::Connection* con) {
 	return 0;
 }
 
 int Arena::run_bot_bins() {
+	// 4) Wait for a response from both clients.They can now play / step.
 	int res = ArenaResult::None;
 	vector<future<ClientStatus>> threads_tick(num_players);
 
 	// Start each bot's binary as a subprocess
 	for (auto const &b : bots) {
-		string full_cmd = b.path;
-		for (const string &s : b.cmd_args) full_cmd += s;
-		cout << "Spawning " << full_cmd << endl;
-		
-		try {
-			// bot_procs.push_back(bp::child(full_cmd));
-		}
-		catch (exception e) {
-			cerr << "Failed to start " << full_cmd << endl;
-			cerr << e.what();
-		}
+		pids.push_back(start_proc(b.path, b.cmd_args));
 	}
-	
+
+	cout << "Giving bots 5s to join..." << endl;
+	this_thread::sleep_for(std::chrono::nanoseconds(5s));
+	cout << "Starting game" << endl;
 
 	// For each bot make a thread to handle the connection
 	for (int i = 0; i < num_players; i++) {
 		threads_tick[i] = async(&client_tick, connections[i], servers[i]);
 	}
-
-	cout << "Giving bots 5s to start...";
-	this_thread::sleep_for(std::chrono::nanoseconds(5s));
 
 	vector<future_status> statuses_tick(num_players);
 	// Run them until game ends.
@@ -262,7 +223,7 @@ int Arena::run_bot_bins() {
 
 		for (unsigned int i = 0; i < statuses_tick.size(); i++) {
 			if (statuses_tick[i] == future_status::ready) {
-				cout << "bot " << bots[i].name << " done\n";
+				cout << "bot " << bots[i].name << " done" << endl;
 				ClientStatus cs = threads_tick[i].get();
 				switch (cs) {
 				case ClientStatus::ClientTimeout:	res = res | (Player1Crash + (1u << i));
@@ -287,10 +248,29 @@ int Arena::run_bot_bins() {
 }
 
 int Arena::play(string map, int argc, char* argv[]) {
-	// Run the protocol...
+	// Follow the instructions...
+	// https://github.com/Blizzard/s2client-proto/blob/master/s2clientprotocol/sc2api.proto
 
 	start_sc2(PORT_P1, argc, argv);
 	connect_players(int(PORT_P1 + bots.size()), map, process_settings.process_path);
 
 	return run_bot_bins();
 }
+
+//bool Arena::kill_procs() {
+//	bool res = true;
+//	for (uint64_t pid : pids)
+//		if (!kill_proc(pid))
+//			res = false;
+//
+//	return res;
+//};
+//
+//void Arena::sig_handler() {
+//	if (!kill_procs())
+//		cout << "Failed to kill some subprocess" << endl;
+//	else
+//		cout << "Killed all subprocesses" << endl;
+//
+//	exit(1);
+//};

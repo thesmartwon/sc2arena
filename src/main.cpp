@@ -46,7 +46,7 @@ static string result_string(ArenaResult res) {
 		if (res & i) {
 			msg += "Player" + to_string(i) + "Forfeit\n";
 		}
-	}
+	} uint64_t a = 3;
 	for (int i = ArenaResult::Player1Win; i <= ArenaResult::Player8Win; i++) {
 		if (res & i) {
 			msg += "Player" + to_string(i) + "Win\n";
@@ -75,6 +75,7 @@ int main(int argc, char* argv[]) {
 
 	Bot b1, b2;
 	b1.name = "5minBot";
+	//b1.path = "C:/dev/CryptBot/x64/Release/CryptBot.exe";
 	b1.path = "C:/dev/5minBot/bin/5minBot.exe";
 	b1.cmd_args = make_args(b1, PORT_P1, PORT_GAME_START, false);
 	b1.race = sc2::Terran;
@@ -93,11 +94,11 @@ int main(int argc, char* argv[]) {
 
 	maps = { "AcolyteLE.SC2Map" };
 	
-	Arena arena(bots, maps);
+	Arena::init(bots, maps);
 	vector<int> results;
 	TournamentType type;
 
-	results.push_back(arena.play(maps[0], argc, argv));
+	results.push_back(Arena::play(maps[0], argc, argv));
 
 	return 0;
 }

@@ -22,12 +22,6 @@ struct Bot : sc2::PlayerSetup {
 	int seed;
 };
 
-struct SC2ProcSettings {
-	sc2::ProcessSettings process_settings;
-	sc2::GameSettings game_settings;
-	vector<sc2::Server*> servers;
-	vector<uint64_t> sc2_pids;
-};
 enum ClientStatus {
 	GameEnd,
 	GameTimeout,
