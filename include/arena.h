@@ -117,7 +117,7 @@ namespace Arena {
 		for (int i = 0; i < num_players; i++) {
 			cout << "Player " << i << ", connecting port:" << port << endl;
 			connections.push_back(new sc2::Connection());
-			connections.back()->Connect(BOT_HOST, port++);
+			connections.back()->Connect(BOT_HOST, port++, false);
 		}
 
 		// 2) Designate a host, and Request.create_game with a multiplayer map.
@@ -202,7 +202,7 @@ namespace Arena {
 
 				last_request = clock();
 			}
-			else if ((last_request + (50 * CLOCKS_PER_SEC)) < clock()) {
+			else if ((last_request + (10 * CLOCKS_PER_SEC)) < clock()) {
 				cout << "Client timeout" << endl;
 				client_status = ClientStatus::ClientTimeout;
 			}
@@ -236,6 +236,7 @@ namespace Arena {
 		vector<future_status> statuses_tick(num_players);
 		// Run them until game ends.
 		while (true) {
+			// FIX THREADING HERE
 			// Wait for first thread
 			statuses_tick[0] = threads_tick[0].wait_for(500ms);
 			// Get status of the rest
@@ -254,6 +255,7 @@ namespace Arena {
 					}
 				}
 			}
+
 		}
 		// Get who won
 		res = res | get_results(connections[0]);
